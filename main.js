@@ -39,6 +39,36 @@ if (!gotLock) { app.quit(); process.exit(0); }
 let mainWindow = null;
 let tray       = null;
 let quitting   = false;
+let pdfWindows = [];
+
+// ─── PDF / document windows ─────────────────────────────────────────────────────
+//
+// Invoice + packing-label PDFs are auth-gated (Google OAuth, persist:b2badmin), so the
+// signed-out system browser can't load them — they open in an in-app window that SHARES
+// the session. Each gets its own standalone window so the user simply closes it to
+// return; the MAIN window is never navigated away to a chromeless inline PDF (which had
+// no back button and forced an app restart).
+
+function isPdfUrl(url) {
+  return /\.pdf($|[?#])/i.test(url || '');
+}
+
+function openPdfWindow(url) {
+  const win = new BrowserWindow({
+    width: 1000,
+    height: 820,
+    title: 'Document — ' + APP_NAME,
+    icon: ICON_PATH,
+    backgroundColor: '#ffffff',
+    autoHideMenuBar: true,
+    webPreferences: { partition: 'persist:b2badmin' },
+  });
+  win.setMenuBarVisibility(false);
+  win.on('closed', () => { pdfWindows = pdfWindows.filter((w) => w !== win); });
+  pdfWindows.push(win);
+  win.loadURL(url);
+  return win;
+}
 
 // ─── App lifecycle ────────────────────────────────────────────────────────────
 
@@ -154,9 +184,23 @@ function createMainWindow() {
 
   // Let the Google OAuth popup open in-app; send everything else to the browser.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    // Invoice / packing-label PDFs -> dedicated in-app window (shares the authed
+    // session); never a chromeless popup or the signed-out system browser.
+    if (isPdfUrl(url)) { openPdfWindow(url); return { action: 'deny' }; }
     if (AUTH_HOSTS.some((h) => url.startsWith(h))) return { action: 'allow' };
     shell.openExternal(url);
     return { action: 'deny' };
+  });
+
+  // A plain (same-window) link to a PDF — e.g. the orders-list "invoice" link — would
+  // otherwise navigate the MAIN window to the inline PDF, stranding the user with no
+  // back button (the reported "have to restart the app" bug). Intercept ONLY PDF
+  // navigations and open them in their own window; leave all normal admin nav alone.
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    if (isPdfUrl(url)) {
+      event.preventDefault();
+      openPdfWindow(url);
+    }
   });
 
   mainWindow.once('ready-to-show', () => {
